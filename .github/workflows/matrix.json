@@ -1,0 +1,8 @@
+[
+  {
+    "id": "rpi4-64",
+    "defconfig": "rpi4_64",
+    "platform": "linux/arm64",
+    "label": "board/raspberrypi"
+  }
+]

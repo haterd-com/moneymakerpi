@@ -1,0 +1,111 @@
+name: Development build
+
+on:
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened,synchronize,labeled]
+
+jobs:
+  prepare:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-dev-build') }}
+    name: Prepare build
+    runs-on: ubuntu-latest
+    outputs:
+      version_main: ${{ steps.version_main.outputs.version_main }}
+      version_dev: ${{ steps.version_dev.outputs.version_dev }}${{ steps.version_pr.outputs.version_pr }}
+      matrix: ${{ steps.generate_matrix.outputs.result }}
+    steps:
+      - name: Generate Development build version
+        shell: bash
+        id: version_dev
+        run: |
+          version_dev="dev$(date --utc +'%Y%m%d')"
+          echo "Development version \"${version_dev}\""
+          echo "::set-output name=version_dev::${version_dev}"
+
+      - name: Generate Development build version for PR
+        if: ${{ github.event.pull_request }}
+        shell: bash
+        id: version_pr
+        run: |
+          version_pr=$(printf "%05d" ${{ github.event.pull_request.number }})
+          echo "Development build for PR #${{ github.event.pull_request.number }}"
+          echo "::set-output name=version_pr::${version_pr}"
+      - uses: actions/checkout@v2
+      - name: Get Major/Minor version
+        id: version_main
+        run: |
+          major=$(cat ${GITHUB_WORKSPACE}/buildroot-external/meta | grep VERSION_MAJOR | cut -d'=' -f2)
+          build=$(cat ${GITHUB_WORKSPACE}/buildroot-external/meta | grep VERSION_BUILD | cut -d'=' -f2)
+          echo "::set-output name=version_main::${major}.${build}"
+      - name: Create build matrix
+        uses: actions/github-script@v4
+        id: generate_matrix
+        with:
+          script: |
+            const boards = require('./.github/workflows/matrix.json')
+            if (context.eventName == "workflow_dispatch") {
+              console.log("Run full build for all boards")
+              return { "board": boards }
+            }
+            const labels = context.payload.pull_request.labels.map(l => l.name)
+            const labelsSet = new Set(labels)
+            const buildBoards = boards.filter(b => labelsSet.has(b.label))
+            return { "board": buildBoards }
+
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'run-dev-build') }}
+    name: Development build for ${{ matrix.board.id }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    env:
+      # Latest long term support release: 2021.02.7
+      BUILDROOT_VERSION: '2021.02.7'
+    steps:
+      - name: Generate Development build version
+        shell: bash
+        id: version_dev
+        run: |
+          version_dev="dev$(date --utc +'%Y%m%d')"
+          echo "Development version \"${version_dev}\""
+          echo "::set-output name=version_dev::${version_dev}"
+
+      - uses: actions/checkout@v2
+      - name: Set up QEMU
+        id: qemu
+        uses: docker/setup-qemu-action@v1
+        with:
+          image: tonistiigi/binfmt:latest
+          platforms: arm64,arm
+
+      - name: Available platforms
+        run: echo ${{ steps.qemu.outputs.platforms }}
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Inspect builder
+        run: |
+          echo "Name:      ${{ steps.buildx.outputs.name }}"
+          echo "Endpoint:  ${{ steps.buildx.outputs.endpoint }}"
+          echo "Status:    ${{ steps.buildx.outputs.status }}"
+          echo "Flags:     ${{ steps.buildx.outputs.flags }}"
+          echo "Platforms: ${{ steps.buildx.outputs.platforms }}"
+
+      - name: Build
+        run: |
+          docker --debug buildx build --platform ${{ matrix.board.platform }} \
+            --build-arg BUILDROOT_VERSION=${{ env.BUILDROOT_VERSION }} \
+            --build-arg DEFCONFIG=${{ matrix.board.defconfig }} \
+            -t moneymaker-builder -f Dockerfile .
+
+      - name: Capture image as an artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: mmos_${{ matrix.board.output }}-${{ needs.validate_release.outputs.version }}.img.xz
+          path: ${{ github.workspace }}/release/mmos_${{ matrix.board.output }}-${{ needs.validate_release.outputs.version }}.img.xz
+          if-no-files-found: error
